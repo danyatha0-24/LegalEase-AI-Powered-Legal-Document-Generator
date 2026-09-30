@@ -1,0 +1,263 @@
+legalease/
+├── main.py                   # Entry point (FastAPI)
+├── config.py                 # Configuration and environment variables
+├── services/
+│   └── ai_service.py         # Gemini API integration (Epic 1)
+├── core/
+│   └── document_generator.py # Core functionalities: docx, pdf, txt (Epic 2)
+├── routers/
+│   └── legal_docs.py         # API Endpoints logic (Epic 3)
+├── static/
+│   ├── index.html            # Frontend interface (Epic 4)
+│   ├── app.js                # Frontend logic (Epic 4)
+│   └── style.css             # Frontend styling (Epic 4)
+├── requirements.txt          # Python dependencies
+└── Dockerfile                # Deployment readiness (Epic 5)
+fastapi>=0.100.0
+uvicorn>=0.22.0
+google-generativeai>=0.3.0
+python-docx>=0.8.11
+fpdf2>=2.7.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class AIService:
+    def __init__(self):
+        api_key = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
+        genai.configure(api_key=api_key)
+        # Using Gemini model for legal document generation
+        self.model = genai.GenerativeModel("gemini-pro")
+
+    def generate_legal_content(self, doc_type: str, parties: str, key_terms: str) -> str:
+        prompt = f"""
+        You are an expert legal draft assistant. Generate a formal {doc_type} contract.
+        
+        Parties Involved:
+        {parties}
+        
+        Key Terms & Clauses:
+        {key_terms}
+        
+        Ensure professional language, clear section headings, standard legal boilerplate, 
+        and structured formatting.
+        """
+        response = self.model.generate_content(prompt)
+        return response.text
+
+ai_service = AIService()
+import io
+from docx import Document
+from fpdf import FPDF
+
+class DocumentExporter:
+    @staticmethod
+    def to_txt(content: str) -> io.BytesIO:
+        buffer = io.BytesIO()
+        buffer.write(content.encode('utf-8'))
+        buffer.seek(0)
+        return buffer
+
+    @staticmethod
+    def to_docx(content: str) -> io.BytesIO:
+        doc = Document()
+        for line in content.split('\n'):
+            if line.startswith('#'):
+                doc.add_heading(line.lstrip('#').strip(), level=1)
+            else:
+                doc.add_paragraph(line)
+        
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        return buffer
+
+    @staticmethod
+    def to_pdf(content: str) -> io.BytesIO:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=11)
+        
+        # Simple multi-line text write
+        for line in content.split('\n'):
+            # Encode/decode to maintain ASCII compatibility for standard FPDF fonts
+            clean_line = line.encode('latin-1', 'replace').decode('latin-1')
+            pdf.multi_cell(0, 10, txt=clean_line)
+            
+        buffer = io.BytesIO()
+        pdf_output = pdf.output()
+        buffer.write(pdf_output)
+        buffer.seek(0)
+        return buffer
+from fastapi import APIRouter, HTTPException, Response
+from pydantic import BaseModel
+from services.ai_service import ai_service
+from core.document_generator import DocumentExporter
+
+router = APIRouter(prefix="/api/v1/documents", tags=["Documents"])
+
+class DocumentRequest(BaseModel):
+    doc_type: str  # e.g., "NDA", "Employment Contract", "Lease Agreement"
+    parties: str   # e.g., "Company A and John Doe"
+    key_terms: str # e.g., "Effective Date: Oct 1, 2026. Non-compete duration: 2 years."
+
+class DownloadRequest(BaseModel):
+    content: str
+    export_format: str  # "pdf", "docx", "txt"
+
+@router.post("/generate")
+async def generate_document(payload: DocumentRequest):
+    try:
+        content = ai_service.generate_legal_content(
+            doc_type=payload.doc_type,
+            parties=payload.parties,
+            key_terms=payload.key_terms
+        )
+        return {"status": "success", "generated_doc": content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/export")
+async def export_document(payload: DownloadRequest):
+    fmt = payload.export_format.lower()
+    
+    if fmt == "pdf":
+        buffer = DocumentExporter.to_pdf(payload.content)
+        media_type = "application/pdf"
+        filename = "legal_document.pdf"
+    elif fmt == "docx":
+        buffer = DocumentExporter.to_docx(payload.content)
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = "legal_document.docx"
+    elif fmt == "txt":
+        buffer = DocumentExporter.to_txt(payload.content)
+        media_type = "text/plain"
+        filename = "legal_document.txt"
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported format")
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from routers.legal_docs import router as doc_router
+
+app = FastAPI(title="LegalEase - AI Legal Document Generator")
+
+# Include API Router
+app.include_router(doc_router)
+
+# Serve Frontend static assets
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>LegalEase - AI Generator</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f4f6f9; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        input, textarea, button { width: 100%; margin-top: 10px; padding: 10px; border-radius: 4px; border: 1px solid #ccc; box-sizing: border-box; }
+        button { background: #0066cc; color: white; font-weight: bold; cursor: pointer; border: none; }
+        button:hover { background: #0052a3; }
+        textarea { height: 180px; }
+        .output-area { margin-top: 20px; }
+        .actions { display: flex; gap: 10px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>LegalEase: AI-Powered Legal Document Generator</h2>
+        <label>Document Type:</label>
+        <input type="text" id="docType" placeholder="e.g. Non-Disclosure Agreement">
+        
+        <label>Parties Involved:</label>
+        <input type="text" id="parties" placeholder="e.g. Company A (Disclosing) and John Doe (Receiving)">
+        
+        <label>Key Terms & Clauses:</label>
+        <textarea id="keyTerms" placeholder="e.g. Effective date Oct 1, 2026. Duration 2 years. Confidentiality obligatons apply."></textarea>
+        
+        <button onclick="generateDoc()">Generate Legal Document</button>
+
+        <div class="output-area">
+            <h3>Preview & Edit:</h3>
+            <textarea id="docPreview"></textarea>
+            <div class="actions">
+                <button onclick="downloadDoc('pdf')">Download PDF</button>
+                <button onclick="downloadDoc('docx')">Download DOCX</button>
+                <button onclick="downloadDoc('txt')">Download TXT</button>
+            </div>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
+async function generateDoc() {
+    const docType = document.getElementById('docType').value;
+    const parties = document.getElementById('parties').value;
+    const keyTerms = document.getElementById('keyTerms').value;
+
+    const response = await fetch('/api/v1/documents/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_type: docType, parties: parties, key_terms: keyTerms })
+    });
+
+    const data = await response.json();
+    if (data.status === "success") {
+        document.getElementById('docPreview').value = data.generated_doc;
+    } else {
+        alert("Generation failed!");
+    }
+}
+
+async function downloadDoc(format) {
+    const content = document.getElementById('docPreview').value;
+    if (!content) return alert("No document generated to export.");
+
+    const response = await fetch('/api/v1/documents/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: content, export_format: format })
+    });
+
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `legal_document.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+}
+# Use official lightweight Python image
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application source code
+COPY . .
+
+# Expose server port
+EXPOSE 8000
+
+# Run FastAPI app with Uvicorn server
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+pip install -r requirements.txt
+GEMINI_API_KEY=your_actual_gemini_api_key_here
+uvicorn main:app --reload
